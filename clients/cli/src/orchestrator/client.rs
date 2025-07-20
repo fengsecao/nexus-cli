@@ -16,7 +16,6 @@ use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use prost::Message;
 use reqwest::{Client, ClientBuilder, Response, Proxy};
 use std::sync::{Arc, Mutex};
-use std::sync::OnceLock;
 use std::time::Duration;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -32,7 +31,188 @@ use crate::consts;
 // Only stores 2-letter country codes (e.g., "US", "CA", "GB") to help route
 // requests to the nearest Nexus network servers for better performance.
 // No precise location, IP addresses, or personal data is collected or stored.
-static COUNTRY_CODE: OnceLock<String> = OnceLock::new();
+static COUNTRY_CODE: OnceCell<String> = OnceCell::new();
+
+// 添加一个常量控制日志输出
+const VERBOSE_LOGS: bool = false;
+
+/// 代理信息结构
+#[derive(Clone, Debug)]
+struct ProxyInfo {
+    url: String,
+    username: String,
+    password: String,
+    country: String,
+}
+
+/// 节点代理状态管理
+#[derive(Debug)]
+struct NodeProxyState {
+    /// 存储节点ID到代理的映射关系
+    node_proxies: Mutex<HashMap<String, ProxyInfo>>,
+    /// 记录节点连续失败次数
+    failure_counts: Mutex<HashMap<String, usize>>,
+}
+
+impl NodeProxyState {
+    /// 创建新的节点代理状态管理器
+    pub fn new() -> Self {
+        Self {
+            node_proxies: Mutex::new(HashMap::new()),
+            failure_counts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 获取节点的代理
+    pub fn get_proxy(&self, node_id: &str) -> Option<ProxyInfo> {
+        let proxies = self.node_proxies.lock().unwrap();
+        proxies.get(node_id).cloned()
+    }
+
+    /// 设置节点的代理
+    pub fn set_proxy(&self, node_id: &str, proxy: ProxyInfo) {
+        let mut proxies = self.node_proxies.lock().unwrap();
+        proxies.insert(node_id.to_string(), proxy);
+    }
+
+    /// 增加节点的失败次数
+    pub fn increment_failure(&self, node_id: &str) -> usize {
+        let mut counts = self.failure_counts.lock().unwrap();
+        let count = counts.entry(node_id.to_string()).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// 重置节点的失败次数
+    pub fn reset_failure(&self, node_id: &str) {
+        let mut counts = self.failure_counts.lock().unwrap();
+        counts.insert(node_id.to_string(), 0);
+    }
+}
+
+/// 代理管理器
+#[derive(Debug)]
+struct ProxyManager {
+    proxies: Arc<Mutex<Vec<ProxyInfo>>>,
+}
+
+impl ProxyManager {
+    /// 创建新的代理管理器
+    pub fn new() -> Self {
+        Self {
+            proxies: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// 从文件加载代理列表
+    pub fn load_from_file(&self, file_path: &str) -> io::Result<()> {
+        if VERBOSE_LOGS {
+            info!("开始加载代理文件: {}", file_path);
+        }
+        let path = Path::new(file_path);
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                if VERBOSE_LOGS {
+                    error!("打开代理文件失败: {} - {}", file_path, e);
+                }
+                return Err(e);
+            }
+        };
+
+        let reader = io::BufReader::new(file);
+        let mut proxies = Vec::new();
+        let mut line_count = 0;
+        let mut _valid_count = 0;  // 添加下划线前缀
+
+        for line in reader.lines() {
+            line_count += 1;
+            if let Ok(line) = line {
+                if line.trim().is_empty() || line.starts_with('#') {
+                    continue;
+                }
+
+                // 解析格式: host:port:username:password
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 4 {
+                    let host = parts[0];
+                    let port = parts[1];
+                    let username = parts[2];
+
+                    // 第四部分及之后的所有内容都作为密码
+                    // 重新组合第四部分及之后的所有内容（如果有的话）
+                    let password = if parts.len() > 4 {
+                        // 如果有多个冒号，重新组合第四部分及之后的所有内容
+                        parts[3..].join(":")
+                    } else {
+                        // 只有四部分，直接使用第四部分
+                        parts[3].to_string()
+                    };
+
+                    // 尝试从密码中解析国家信息，但不改变密码本身
+                    let country = if password.contains("_country-") {
+                        // 如果密码包含国家信息，提取出来用于显示
+                        let parts: Vec<&str> = password.split("_country-").collect();
+                        if parts.len() > 1 && !parts[1].is_empty() {
+                            parts[1].to_string()
+                        } else {
+                            "UNKNOWN".to_string()
+                        }
+                    } else {
+                        "UNKNOWN".to_string()
+                    };
+
+                    // 使用HTTP协议
+                    let url = format!("http://{}:{}", host, port);
+
+                    proxies.push(ProxyInfo {
+                        url,
+                        username: username.to_string(),
+                        password,
+                        country,
+                    });
+                    _valid_count += 1;
+                } else {
+                    warn!("代理格式错误 (行 {}): {}", line_count, line);
+                }
+            }
+        }
+
+        // 更新代理列表
+        if !proxies.is_empty() {
+            let mut proxy_list = self.proxies.lock().unwrap();
+            *proxy_list = proxies;
+            if VERBOSE_LOGS {
+                info!("已加载 {} 个代理 (总行数: {})", proxy_list.len(), line_count);
+            }
+            Ok(())
+        } else {
+            let err = io::Error::new(io::ErrorKind::InvalidData, "代理文件为空或格式不正确");
+            error!("代理文件无效: {} - 没有找到有效代理", file_path);
+            Err(err)
+        }
+    }
+
+    /// 获取下一个代理
+    pub fn next_proxy(&self) -> Option<ProxyInfo> {
+        let proxies = self.proxies.lock().unwrap();
+        if proxies.is_empty() {
+            // 不输出警告，因为这可能是正常情况（用户选择不使用代理）
+            return None;
+        }
+
+        // 随机选择一个代理
+        let mut rng = thread_rng();
+        let selected = proxies.choose(&mut rng).cloned();
+
+        if selected.is_none() {
+            // 只有在代理列表不为空但无法选择代理时才输出警告
+            warn!("无法从代理列表中选择代理");
+        }
+
+        selected
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorClient {
