@@ -237,7 +237,6 @@ impl OrchestratorClient {
 
         Self {
             client: ClientBuilder::new()
-                .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("Failed to create HTTP client"),
@@ -906,6 +905,15 @@ impl Orchestrator for OrchestratorClient {
         let url = self.build_url("v3/nodes");
         let response: RegisterNodeResponse = self.execute_post_request(&url, request_bytes, default_node_id).await?;
         Ok(response.node_id)
+    }
+
+    /// Get the wallet address associated with a node ID.
+    async fn get_node(&self, node_id: &str) -> Result<String, OrchestratorError> {
+        let endpoint = format!("v3/nodes/{}", node_id);
+
+        let node_response: crate::nexus_orchestrator::GetNodeResponse =
+            self.get_request(&endpoint).await?;
+        Ok(node_response.wallet_address)
     }
 
     async fn get_tasks(&self, node_id: &str) -> Result<Vec<Task>, OrchestratorError> {
