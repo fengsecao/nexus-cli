@@ -913,8 +913,6 @@ impl Orchestrator for OrchestratorClient {
        // 使用默认节点ID
        let url = self.build_url(&endpoint);
        let node_response: GetNodeResponse = self.execute_get_request(&url, vec![], node_id).await?;
-       Ok(user_response.user_id)
-
        Ok(node_response.wallet_address)
     }
 
