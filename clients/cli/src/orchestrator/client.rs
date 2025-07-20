@@ -26,12 +26,13 @@ use std::path::Path;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use crate::consts;
+use std::sync::OnceLock;
 
 // Privacy-preserving country detection for network optimization.
 // Only stores 2-letter country codes (e.g., "US", "CA", "GB") to help route
 // requests to the nearest Nexus network servers for better performance.
 // No precise location, IP addresses, or personal data is collected or stored.
-static COUNTRY_CODE: OnceCell<String> = OnceCell::new();
+static COUNTRY_CODE: OnceLock<String> = OnceLock::new();
 
 // 添加一个常量控制日志输出
 const VERBOSE_LOGS: bool = false;
@@ -923,8 +924,9 @@ impl Orchestrator for OrchestratorClient {
         };
         let request_bytes = Self::encode_request(&request);
 
-        // 使用带节点ID的请求方法
-        let response: GetTasksResponse = self.get_request_with_retry("v3/tasks", request_bytes, node_id).await?;
+        let endpoint = format!("v3/nodes/{}", node_id);
+
+        let response: GetTasksResponse = self.get_request_with_retry(endpoint, vec![], node_id).await?;
         let tasks = response.tasks.iter().map(Task::from).collect();
         Ok(tasks)
     }
