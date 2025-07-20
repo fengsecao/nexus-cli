@@ -6,7 +6,7 @@ use crate::environment::Environment;
 use crate::nexus_orchestrator::{
     GetProofTaskRequest, GetProofTaskResponse, GetTasksRequest, GetTasksResponse, NodeType,
     RegisterNodeRequest, RegisterNodeResponse, RegisterUserRequest, SubmitProofRequest,
-    UserResponse,
+    UserResponse,GetNodeResponse
 };
 use crate::orchestrator::Orchestrator;
 use crate::orchestrator::error::OrchestratorError;
@@ -910,10 +910,12 @@ impl Orchestrator for OrchestratorClient {
     /// Get the wallet address associated with a node ID.
     async fn get_node(&self, node_id: &str) -> Result<String, OrchestratorError> {
         let endpoint = format!("v3/nodes/{}", node_id);
+       // 使用默认节点ID
+       let url = self.build_url(&endpoint);
+       let node_response: GetNodeResponse = self.execute_get_request(&url, vec![], node_id).await?;
+       Ok(user_response.user_id)
 
-        let node_response: crate::nexus_orchestrator::GetNodeResponse =
-            self.get_request(&endpoint).await?;
-        Ok(node_response.wallet_address)
+       Ok(node_response.wallet_address)
     }
 
     async fn get_tasks(&self, node_id: &str) -> Result<Vec<Task>, OrchestratorError> {
