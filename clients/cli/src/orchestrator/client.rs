@@ -407,7 +407,7 @@ impl OrchestratorClient {
     /// 检查是否是需要重试的错误（如429或网络错误）
     fn is_retryable_error(&self, error: &OrchestratorError) -> bool {
         match error {
-            OrchestratorError::Http { status, message: _ } => {
+            OrchestratorError::Http { status, message: _, , headers: _  } => {
                 // 检查是否是429错误
                 if *status == reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16() {
                     return true;
@@ -428,7 +428,7 @@ impl OrchestratorClient {
     /// 如果是429错误，使用配置的超时时间（带随机浮动）
     fn is_429_error(&self, error: &OrchestratorError) -> bool {
         match error {
-            OrchestratorError::Http { status, message: _ } => {
+            OrchestratorError::Http { status, message: _, headers: _  } => {
                 *status == reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16()
             }
             _ => false,
