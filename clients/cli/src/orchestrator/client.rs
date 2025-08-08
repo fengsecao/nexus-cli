@@ -6,9 +6,7 @@ use crate::environment::Environment;
 use crate::nexus_orchestrator::{
     GetProofTaskRequest, GetProofTaskResponse, NodeType, RegisterNodeRequest, RegisterNodeResponse,
     RegisterUserRequest, SubmitProofRequest, TaskDifficulty, UserResponse,
-    GetProofTaskRequest, GetProofTaskResponse, GetTasksRequest, GetTasksResponse, NodeType,
-    RegisterNodeRequest, RegisterNodeResponse, RegisterUserRequest, SubmitProofRequest,
-    UserResponse,GetNodeResponse
+   GetTasksRequest, GetTasksResponse,GetNodeResponse
 };
 use crate::orchestrator::Orchestrator;
 use crate::orchestrator::error::OrchestratorError;
@@ -446,13 +444,7 @@ impl OrchestratorClient {
     ) -> Result<T, OrchestratorError> {
         const MAX_RETRIES: usize = 3;
         let url = self.build_url(endpoint);
-        let response = self
-            .client
-            .get(&url)
-            .header("User-Agent", USER_AGENT)
-            .header("X-Build-Timestamp", BUILD_TIMESTAMP)
-            .send()
-            .await?;
+
 
         // 初始尝试
         let mut result = self.execute_get_request::<T>(&url, body.clone(), node_id).await;
@@ -540,6 +532,8 @@ impl OrchestratorClient {
         let response = client
             .get(url)
             .header("Content-Type", "application/octet-stream")
+            .header("User-Agent", USER_AGENT)
+            .header("X-Build-Timestamp", BUILD_TIMESTAMP)
             .body(body)
             .send()
             .await?;
