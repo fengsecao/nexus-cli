@@ -933,12 +933,6 @@ impl Orchestrator for OrchestratorClient {
        Ok(node_response.wallet_address)
     }
 
-    async fn get_tasks(&self, node_id: &str) -> Result<Vec<Task>, OrchestratorError> {
-        let response: GetTasksResponse = self.get_request_with_retry(&format!("v3/tasks/{}", node_id), vec![], node_id).await?;
-        let tasks = response.tasks.iter().map(Task::from).collect();
-        Ok(tasks)
-    }
-
     async fn get_proof_task(
         &self,
         node_id: &str,
