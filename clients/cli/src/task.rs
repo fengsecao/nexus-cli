@@ -43,18 +43,21 @@ impl Task {
         }
     }
 
-    /// Combines multiple proof hashes into a single hash using Keccak-256
-    /// This matches the JavaScript implementation: combineHashes
+    /// Combines multiple proof hashes into a single hash using Keccak-256,
+    /// mimicking the JavaScript Buffer.concat approach.
     pub fn combine_proof_hashes(hashes: &[String]) -> String {
         if hashes.is_empty() {
             return String::new();
         }
 
-        // Concatenate all hash strings
-        let combined = hashes.join("");
+        // Convert each input string to bytes (empty string if None)
+        let all_bytes: Vec<u8> = hashes
+            .iter()
+            .flat_map(|input| input.as_bytes())
+            .copied()
+            .collect();
 
-        // Hash the combined string using Keccak-256
-        let hash = Keccak256::digest(combined.as_bytes());
+        let hash = Keccak256::digest(&all_bytes);
         format!("{:x}", hash)
     }
 
@@ -93,18 +96,8 @@ impl From<&crate::nexus_orchestrator::Task> for Task {
 // From GetProofTaskResponse
 impl From<&crate::nexus_orchestrator::GetProofTaskResponse> for Task {
     fn from(response: &crate::nexus_orchestrator::GetProofTaskResponse) -> Self {
-        let task_type = crate::nexus_orchestrator::TaskType::try_from(
-            response.task.as_ref().unwrap().task_type,
-        )
-        .unwrap();
-
-        Task {
-            task_id: response.task_id.clone(),
-            program_id: response.program_id.clone(),
-            public_inputs: response.public_inputs.clone(),
-            public_inputs_list: vec![response.public_inputs.clone()],
-            task_type,
-        }
+        // Use the task field instead of deprecated fields
+        Task::from(response.task.as_ref().unwrap())
     }
 }
 
