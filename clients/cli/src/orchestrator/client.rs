@@ -28,6 +28,16 @@ use std::collections::HashMap;
 use crate::consts;
 use std::sync::OnceLock;
 
+/// Proof payload returned by `select_proof_payload`.
+///
+/// Tuple components (in order):
+/// 1. `Vec<u8>`: legacy single-proof bytes (set only when exactly one proof is present and the
+///    server expects a single proof field; otherwise empty)
+/// 2. `Vec<Vec<u8>>`: list of full proof byte blobs for multi-input proofs (empty for
+///    `ProofHash`/`AllProofHashes`)
+/// 3. `Vec<String>`: list of per-input proof hashes (used for `AllProofHashes`; empty otherwise)
+pub(crate) type ProofPayload = (Vec<u8>, Vec<Vec<u8>>, Vec<String>);
+
 // Build timestamp in milliseconds since epoch
 static BUILD_TIMESTAMP: &str = match option_env!("BUILD_TIMESTAMP") {
     Some(timestamp) => timestamp,
@@ -41,7 +51,7 @@ const USER_AGENT: &str = concat!("nexus-cli/", env!("CARGO_PKG_VERSION"));
 // Only stores 2-letter country codes (e.g., "US", "CA", "GB") to help route
 // requests to the nearest Nexus network servers for better performance.
 // No precise location, IP addresses, or personal data is collected or stored.
-static COUNTRY_CODE: OnceLock<String> = OnceLock::new();
+pub(crate) static COUNTRY_CODE: OnceLock<String> = OnceLock::new();
 
 // 添加一个常量控制日志输出
 const VERBOSE_LOGS: bool = false;
@@ -297,6 +307,12 @@ impl OrchestratorClient {
         }
     }
 
+    /// Public accessor for privacy-preserving country code (cached during run)
+    #[allow(dead_code)]
+    pub async fn country(&self) -> String {
+        self.get_country().await
+    }
+
     fn build_url(&self, endpoint: &str) -> String {
         format!(
             "{}/{}",
@@ -311,6 +327,44 @@ impl OrchestratorClient {
 
     fn decode_response<T: Message + Default>(bytes: &[u8]) -> Result<T, OrchestratorError> {
         T::decode(bytes).map_err(OrchestratorError::Decode)
+    }
+
+    /// Selects which proof data to attach based on the `task_type`.
+    ///
+    /// Returns a tuple `(legacy_proof, proofs, individual_proof_hashes)` with the appropriate
+    /// fields populated:
+    /// - For `ProofHash`: no proof bytes and no hashes (server derives hash elsewhere).
+    /// - For `AllProofHashes`: no proof bytes; `individual_proof_hashes` populated.
+    /// - For other types (e.g. `ProofRequired`): `legacy_proof` is set only when exactly
+    ///   one proof is present (back-compat), and `proofs` contains the vector of full proofs.
+    pub(crate) fn select_proof_payload(
+        task_type: crate::nexus_orchestrator::TaskType,
+        legacy_proof: Vec<u8>,
+        proofs: Vec<Vec<u8>>,
+        individual_proof_hashes: &[String],
+    ) -> ProofPayload {
+        match task_type {
+            crate::nexus_orchestrator::TaskType::ProofHash => {
+                // For ProofHash tasks, don't send proof or individual hashes
+                (Vec::new(), Vec::new(), Vec::new())
+            }
+            crate::nexus_orchestrator::TaskType::AllProofHashes => {
+                // For AllProofHashes tasks, don't send proof but send all individual hashes
+                (Vec::new(), Vec::new(), individual_proof_hashes.to_vec())
+            }
+            _ => {
+                // For ProofRequired and backward compatibility:
+                // - Always include `proofs` as provided
+                // - Include `legacy_proof` only when there is exactly one proof, for servers/paths
+                //   that still expect a single legacy proof field
+                let legacy = if proofs.len() == 1 {
+                    legacy_proof
+                } else {
+                    Vec::new()
+                };
+                (legacy, proofs, Vec::new())
+            }
+        }
     }
 
     async fn handle_response_status(response: Response) -> Result<Response, OrchestratorError> {
@@ -873,6 +927,54 @@ impl OrchestratorClient {
     }
 }
 
+/// Detect country code once globally without requiring a client instance.
+/// This ensures callers don't need to sequence a warm-up before using the result.
+pub(crate) async fn detect_country_once() -> String {
+    if let Some(country) = COUNTRY_CODE.get() {
+        return country.clone();
+    }
+
+    let client = match ClientBuilder::new().timeout(Duration::from_secs(5)).build() {
+        Ok(c) => c,
+        Err(_) => return "US".to_string(),
+    };
+
+    // Try Cloudflare first
+    if let Ok(response) = client
+        .get("https://cloudflare.com/cdn-cgi/trace")
+        .send()
+        .await
+    {
+        if let Ok(text) = response.text().await {
+            for line in text.lines() {
+                if let Some(country) = line.strip_prefix("loc=") {
+                    let country = country.trim().to_uppercase();
+                    if country.len() == 2 && country.chars().all(|c| c.is_ascii_alphabetic()) {
+                        let _ = COUNTRY_CODE.set(country.clone());
+                        return country;
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to ipinfo.io
+    if let Ok(response) = client.get("https://ipinfo.io/country").send().await {
+        if let Ok(text) = response.text().await {
+            let country = text.trim().to_uppercase();
+            if country.len() == 2 && country.chars().all(|c| c.is_ascii_alphabetic()) {
+                let _ = COUNTRY_CODE.set(country.clone());
+                return country;
+            }
+        }
+    }
+
+    // Default fallback
+    let fallback = "US".to_string();
+    let _ = COUNTRY_CODE.set(fallback.clone());
+    fallback
+}
+
 #[async_trait::async_trait]
 impl Orchestrator for OrchestratorClient {
     fn environment(&self) -> &Environment {
@@ -956,6 +1058,7 @@ impl Orchestrator for OrchestratorClient {
         task_id: &str,
         proof_hash: &str,
         proof: Vec<u8>,
+        proofs: Vec<Vec<u8>>,
         signing_key: SigningKey,
         num_provers: usize,
         task_type: crate::nexus_orchestrator::TaskType,
@@ -968,33 +1071,20 @@ impl Orchestrator for OrchestratorClient {
         // Detect country for network optimization (privacy-preserving: only country code, no precise location)
         let location = self.get_country().await;
         // Handle different task types
-        let (proof_to_send, all_proof_hashes_to_send) = match task_type {
-            crate::nexus_orchestrator::TaskType::ProofHash => {
-                // For ProofHash tasks, don't send proof or individual hashes
-                (Vec::new(), Vec::new())
-            }
-            crate::nexus_orchestrator::TaskType::AllProofHashes => {
-                // For AllProofHashes tasks, don't send proof but send all individual hashes
-                // Add warning for large numbers of inputs
-                if individual_proof_hashes.len() > 100 {
-                    eprintln!(
-                        "WARNING: Task with {} individual proof hashes may not scale well for ALL_PROOF_HASHES task type",
-                        individual_proof_hashes.len()
-                    );
-                }
-                (Vec::new(), individual_proof_hashes.to_vec())
-            }
-            _ => {
-                // For ProofRequired and backward compatibility, attach proof
-                (proof, Vec::new())
-            }
-        };
+        let (proof_to_send, proofs_to_send, all_proof_hashes_to_send) =
+            OrchestratorClient::select_proof_payload(
+                task_type,
+                proof,
+                proofs,
+                individual_proof_hashes,
+            );
 
         let request = SubmitProofRequest {
             task_id: task_id.to_string(),
             node_type: NodeType::CliProver as i32,
             proof_hash: proof_hash.to_string(),
             proof: proof_to_send,
+            proofs: proofs_to_send,
             node_telemetry: Some(crate::nexus_orchestrator::NodeTelemetry {
                 flops_per_sec: Some(flops as i32),
                 memory_used: Some(program_memory),
@@ -1005,7 +1095,6 @@ impl Orchestrator for OrchestratorClient {
             ed25519_public_key: public_key,
             signature,
             all_proof_hashes: all_proof_hashes_to_send,
-            proofs: Vec::new(),
         };
         let request_bytes = Self::encode_request(&request);
 
@@ -1104,44 +1193,56 @@ mod tests {
     use crate::nexus_orchestrator::TaskType;
 
     #[tokio::test]
-    /// Should conditionally attach proof based on task type.
-    async fn test_conditional_proof_attachment() {
-        let client = OrchestratorClient::new(Environment::Production);
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let proof = vec![1, 2, 3, 4, 5]; // Example proof bytes
-        let task_id = "test_task_123";
-        let proof_hash = "test_hash_456";
-        let num_workers = 4;
+    /// select_proof_payload rules: only ProofRequired sets proof/proofs.
+    async fn test_select_proof_payload() {
+        // Common inputs
+        let legacy = vec![9, 9, 9];
+        let proofs_multi = vec![vec![1], vec![2]];
+        let proofs_single = vec![vec![7]];
+        let hashes = vec!["a".to_string(), "b".to_string()];
 
-        // Test with ProofRequired task type - should attach proof
-        let result = client
-            .submit_proof(
-                task_id,
-                proof_hash,
-                proof.clone(),
-                signing_key.clone(),
-                num_workers,
-                TaskType::ProofRequired,
-                &[], // No individual proof hashes for this test
-            )
-            .await;
-        // This will fail because we're not actually submitting to a real orchestrator,
-        // but the important thing is that the proof was attached in the request
-        assert!(result.is_err()); // Expected to fail due to network error
+        // PROOF_HASH: both proof and proofs empty; no hashes
+        let (p, ps, hs) = OrchestratorClient::select_proof_payload(
+            TaskType::ProofHash,
+            legacy.clone(),
+            proofs_multi.clone(),
+            &hashes,
+        );
+        assert!(p.is_empty());
+        assert!(ps.is_empty());
+        assert!(hs.is_empty());
 
-        // Test with ProofHash task type - should not attach proof
-        let result = client
-            .submit_proof(
-                task_id,
-                proof_hash,
-                proof,
-                signing_key,
-                num_workers,
-                TaskType::ProofHash,
-                &[], // No individual proof hashes for this test
-            )
-            .await;
-        // This will also fail, but the proof should be empty in the request
-        assert!(result.is_err()); // Expected to fail due to network error
+        // ALL_PROOF_HASHES: both proof and proofs empty; hashes present
+        let (p, ps, hs) = OrchestratorClient::select_proof_payload(
+            TaskType::AllProofHashes,
+            legacy.clone(),
+            proofs_multi.clone(),
+            &hashes,
+        );
+        assert!(p.is_empty());
+        assert!(ps.is_empty());
+        assert_eq!(hs, hashes);
+
+        // PROOF_REQUIRED with multiple proofs: legacy proof empty, proofs set
+        let (p, ps, hs) = OrchestratorClient::select_proof_payload(
+            TaskType::ProofRequired,
+            legacy.clone(),
+            proofs_multi.clone(),
+            &hashes,
+        );
+        assert!(p.is_empty());
+        assert_eq!(ps, proofs_multi);
+        assert!(hs.is_empty());
+
+        // PROOF_REQUIRED with single proof: legacy proof set, proofs set with one element
+        let (p, ps, hs) = OrchestratorClient::select_proof_payload(
+            TaskType::ProofRequired,
+            legacy.clone(),
+            proofs_single.clone(),
+            &hashes,
+        );
+        assert_eq!(p, legacy);
+        assert_eq!(ps, proofs_single);
+        assert!(hs.is_empty());
     }
 }

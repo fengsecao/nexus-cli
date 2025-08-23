@@ -3,7 +3,7 @@ use crate::orchestrator::error::OrchestratorError;
 use crate::task::Task;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
-mod client;
+pub(crate) mod client;
 pub use client::OrchestratorClient;
 pub mod error;
 
@@ -45,6 +45,7 @@ pub trait Orchestrator: Send + Sync {
         task_id: &str,
         proof_hash: &str,
         proof: Vec<u8>,
+        proofs: Vec<Vec<u8>>,
         signing_key: SigningKey,
         num_provers: usize,
         task_type: crate::nexus_orchestrator::TaskType,

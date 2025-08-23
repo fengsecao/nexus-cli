@@ -29,6 +29,25 @@ pub async fn validate_version_requirements() -> Result<(), Box<dyn Error>> {
     };
 
     let current_version = env!("CARGO_PKG_VERSION");
+    // Early OFAC block from server-provided list, if present
+    let country = crate::orchestrator::client::detect_country_once().await;
+    // Restriction check is against keys; printed names come from non-null values
+    if requirements
+        .ofac_country_names
+        .keys()
+        .any(|c| c.eq_ignore_ascii_case(&country))
+    {
+        let display_name = requirements
+            .ofac_country_names
+            .get(&country)
+            .and_then(|v| v.clone())
+            .unwrap_or_else(|| country.clone());
+        eprintln!(
+            "Due to OFAC regulations, this service is not available in {}.\nSee https://nexus.xyz/terms-of-use for more information.",
+            display_name
+        );
+        std::process::exit(1);
+    }
     match requirements.check_version_constraints(current_version, None, None) {
         Ok(Some(violation)) => {
             handle_version_violation(&violation.constraint_type, &violation.message);
