@@ -38,6 +38,23 @@ use std::sync::OnceLock;
 /// 3. `Vec<String>`: list of per-input proof hashes (used for `AllProofHashes`; empty otherwise)
 pub(crate) type ProofPayload = (Vec<u8>, Vec<Vec<u8>>, Vec<String>);
 
+/// Result of fetching a proof task, including both the task and its actual difficulty
+#[derive(Debug, Clone)]
+pub struct ProofTaskResult {
+    pub task: Task,
+    pub actual_difficulty: crate::nexus_orchestrator::TaskDifficulty,
+}
+
+impl std::fmt::Display for ProofTaskResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Task {} (difficulty: {:?})",
+            self.task.task_id, self.actual_difficulty
+        )
+    }
+}
+
 // Build timestamp in milliseconds since epoch
 static BUILD_TIMESTAMP: &str = match option_env!("BUILD_TIMESTAMP") {
     Some(timestamp) => timestamp,
@@ -1039,18 +1056,26 @@ impl Orchestrator for OrchestratorClient {
         &self,
         node_id: &str,
         verifying_key: VerifyingKey,
-    ) -> Result<Task, OrchestratorError> {
+        max_difficulty: crate::nexus_orchestrator::TaskDifficulty,
+    ) -> Result<ProofTaskResult, OrchestratorError> {
         let request = GetProofTaskRequest {
             node_id: node_id.to_string(),
             node_type: NodeType::CliProver as i32,
             ed25519_public_key: verifying_key.to_bytes().to_vec(),
-            max_difficulty: TaskDifficulty::Large as i32,
+            max_difficulty: max_difficulty as i32,
         };
         let request_bytes = Self::encode_request(&request);
 
         // 使用带节点ID的请求方法
         let response: GetProofTaskResponse = self.post_request_with_retry("v3/tasks", request_bytes, node_id).await?;
-        Ok(Task::from(&response))
+//         Ok(Task::from(&response))
+        let task = Task::from(&response);
+        let actual_difficulty = task.difficulty;
+
+        Ok(ProofTaskResult {
+            task,
+            actual_difficulty,
+        })
     }
 
     async fn submit_proof(
@@ -1144,7 +1169,13 @@ mod live_orchestrator_tests {
         let node_id = "5880437"; // Example node ID
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
         let verifying_key = signing_key.verifying_key();
-        let result = client.get_proof_task(node_id, verifying_key).await;
+        let result = client
+            .get_proof_task(
+                node_id,
+                verifying_key,
+                crate::nexus_orchestrator::TaskDifficulty::SmallMedium,
+            )
+            .await;
         match result {
             Ok(task) => {
                 println!("Got proof task: {}", task);
